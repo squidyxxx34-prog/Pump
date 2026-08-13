@@ -1,0 +1,20 @@
+{
+  "name": "pumpfun-trading-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Bot de trading auto (snipe + TP/SL) pour pump.fun via PumpPortal API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2",
+    "ws": "^8.18.0"
+  }
+}
