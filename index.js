@@ -1,4 +1,5 @@
 import "dotenv/config";
+import http from "http";
 import WebSocket from "ws";
 import fetch from "node-fetch";
 import bs58 from "bs58";
@@ -303,5 +304,11 @@ if (CFG.dryRun && CFG.statsIntervalMinutes > 0) {
   setInterval(logPaperSummary, CFG.statsIntervalMinutes * 60 * 1000);
 }
 
-// keepalive simple pour Railway (évite exit process)
-setInterval(() => {}, 1 << 30);
+// serveur HTTP minimal - juste pour répondre au healthcheck Railway (le bot n'a pas besoin de port)
+const port = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("pumpfun-bot OK\n");
+  })
+  .listen(port, () => log(`Healthcheck HTTP en écoute sur le port ${port}`));
