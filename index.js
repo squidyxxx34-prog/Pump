@@ -313,7 +313,7 @@ http
   })
   .listen(port, () => log(`Healthcheck HTTP en écoute sur le port ${port}`));
 
-// ---------- Arrêt propre + robustesse ----------
+// ---------- Arrêt propre + robustessejb ----------
 // évite un crash bruyant (npm error) sur un SIGTERM normal de Railway (redeploy, scaling)
 function gracefulShutdown(signal) {
   log(`Signal ${signal} reçu, arrêt propre du bot...`);
