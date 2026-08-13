@@ -312,3 +312,21 @@ http
     res.end("pumpfun-bot OK\n");
   })
   .listen(port, () => log(`Healthcheck HTTP en écoute sur le port ${port}`));
+
+// ---------- Arrêt propre + robustesse ----------
+// évite un crash bruyant (npm error) sur un SIGTERM normal de Railway (redeploy, scaling)
+function gracefulShutdown(signal) {
+  log(`Signal ${signal} reçu, arrêt propre du bot...`);
+  logPaperSummary();
+  process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// une erreur async oubliée quelque part (fetch, websocket) ne doit pas tuer tout le process
+process.on("unhandledRejection", (err) => {
+  log("Erreur non gérée (promise):", err?.message || err);
+});
+process.on("uncaughtException", (err) => {
+  log("Erreur non gérée (exception):", err?.message || err);
+});
