@@ -28,7 +28,7 @@ const CFG = {
   maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || "1", 10),
   paperStartingBalanceSol: parseFloat(process.env.PAPER_STARTING_BALANCE_SOL || "1"),
   pumpFunFeePct: 1, // fee natif pump.fun, incompressible, appliqué même en paper trading
-  statsIntervalMinutes: parseFloat(process.env.STATS_INTERVAL_MINUTES || "15"),
+  ntfyTopic: process.env.NTFY_TOPIC || "",
 };
 
 const PUMPPORTAL_WS = "wss://pumpportal.fun/api/data";
@@ -54,6 +54,20 @@ const paper = {
 
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
+}
+
+// ---------- Notification push (ntfy.sh, gratuit, sans compte) ----------
+async function notify(title, message) {
+  if (!CFG.ntfyTopic) return;
+  try {
+    await fetch(`https://ntfy.sh/${CFG.ntfyTopic}`, {
+      method: "POST",
+      headers: { Title: title, Priority: "default" },
+      body: message,
+    });
+  } catch (err) {
+    log("Erreur envoi notification:", err.message);
+  }
 }
 
 function logPaperSummary() {
@@ -151,6 +165,10 @@ async function buyToken(tokenEvent) {
   }
 
   log(`ACHAT -> ${tokenEvent.name} (${tokenEvent.symbol}) mint=${mint}`);
+  notify(
+    `🟢 Achat: ${tokenEvent.symbol}`,
+    `${tokenEvent.name} | ${CFG.buyAmountSol} SOL | mint=${mint}`
+  );
 
   const result = await trade("buy", mint, CFG.buyAmountSol, true);
   if (!result) return;
@@ -198,6 +216,12 @@ async function sellToken(mint, reason, exitMarketCapSol) {
       `[PAPER] Clôture ${pos.symbol}: ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(1)}%) | ` +
         `nouveau solde=${paper.balance.toFixed(4)} SOL`
     );
+    notify(
+      `${pnlSol >= 0 ? "🟢" : "🔴"} Vente: ${pos.symbol} ${pnlSol >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`,
+      `${reason} | PnL: ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL | Solde: ${paper.balance.toFixed(4)} SOL`
+    );
+  } else {
+    notify(`💰 Vente: ${pos.symbol}`, `${reason} | mint=${mint}`);
   }
 }
 
@@ -299,10 +323,6 @@ if (!keypair && !CFG.dryRun) {
   log("ATTENTION: aucune clé privée fournie et DRY_RUN=false -> le bot ne pourra pas trader.");
 }
 connectMainSocket();
-
-if (CFG.dryRun && CFG.statsIntervalMinutes > 0) {
-  setInterval(logPaperSummary, CFG.statsIntervalMinutes * 60 * 1000);
-}
 
 // serveur HTTP minimal - juste pour répondre au healthcheck Railway (le bot n'a pas besoin de port)
 const port = process.env.PORT || 3000;
