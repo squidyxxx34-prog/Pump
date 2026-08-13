@@ -25,6 +25,9 @@ const CFG = {
   priorityFeeSol: parseFloat(process.env.PRIORITY_FEE_SOL || "0.0001"),
   dryRun: (process.env.DRY_RUN || "true").toLowerCase() !== "false",
   maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || "1", 10),
+  paperStartingBalanceSol: parseFloat(process.env.PAPER_STARTING_BALANCE_SOL || "1"),
+  pumpFunFeePct: 1, // fee natif pump.fun, incompressible, appliqué même en paper trading
+  statsIntervalMinutes: parseFloat(process.env.STATS_INTERVAL_MINUTES || "15"),
 };
 
 const PUMPPORTAL_WS = "wss://pumpportal.fun/api/data";
@@ -41,8 +44,30 @@ const connection = new Connection(CFG.rpcUrl, "confirmed");
 // positions ouvertes: mint -> { entryPriceSol, amountTokens, buyTimestamp }
 const positions = new Map();
 
+// ---------- Paper trading (solde fictif, données de marché réelles) ----------
+const paper = {
+  balance: CFG.paperStartingBalanceSol,
+  startingBalance: CFG.paperStartingBalanceSol,
+  closedTrades: [], // { pnlSol, pnlPct, reason, name }
+};
+
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
+}
+
+function logPaperSummary() {
+  const n = paper.closedTrades.length;
+  if (n === 0) {
+    log(`[PAPER] Solde=${paper.balance.toFixed(4)} SOL | positions ouvertes=${positions.size} | 0 trade clôturé`);
+    return;
+  }
+  const wins = paper.closedTrades.filter((t) => t.pnlSol > 0).length;
+  const totalPnl = paper.balance - paper.startingBalance;
+  const totalPnlPct = (totalPnl / paper.startingBalance) * 100;
+  log(
+    `[PAPER] Solde=${paper.balance.toFixed(4)} SOL (${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} / ${totalPnlPct.toFixed(1)}%) | ` +
+      `trades=${n} | winrate=${((wins / n) * 100).toFixed(0)}% | positions ouvertes=${positions.size}`
+  );
 }
 
 // ---------- Filtre stratégie snipe ----------
@@ -118,10 +143,20 @@ async function trade(action, mint, amount, denominatedInSol) {
 // ---------- Achat ----------
 async function buyToken(tokenEvent) {
   const mint = tokenEvent.mint;
+
+  if (CFG.dryRun && paper.balance < CFG.buyAmountSol) {
+    log(`[PAPER] Solde fictif insuffisant (${paper.balance.toFixed(4)} SOL), achat ignoré: ${tokenEvent.name}`);
+    return;
+  }
+
   log(`ACHAT -> ${tokenEvent.name} (${tokenEvent.symbol}) mint=${mint}`);
 
   const result = await trade("buy", mint, CFG.buyAmountSol, true);
   if (!result) return;
+
+  if (CFG.dryRun) {
+    paper.balance -= CFG.buyAmountSol; // immobilisé dans la position fictive
+  }
 
   positions.set(mint, {
     entryPriceSol: tokenEvent.marketCapSol ?? tokenEvent.vSolInBondingCurve ?? 0,
@@ -134,7 +169,7 @@ async function buyToken(tokenEvent) {
 }
 
 // ---------- Vente ----------
-async function sellToken(mint, reason) {
+async function sellToken(mint, reason, exitMarketCapSol) {
   const pos = positions.get(mint);
   if (!pos) return;
 
@@ -142,6 +177,27 @@ async function sellToken(mint, reason) {
   // amount=100%, denominatedInSol=false -> vend 100% du solde de tokens
   await trade("sell", mint, "100%", false);
   positions.delete(mint);
+
+  if (CFG.dryRun) {
+    const changePct =
+      pos.entryPriceSol && exitMarketCapSol !== undefined
+        ? ((exitMarketCapSol - pos.entryPriceSol) / pos.entryPriceSol) * 100
+        : 0;
+    // PnL brut sur le montant investi, moins fee pump.fun 1% (aller+retour) et slippage estimé
+    const grossReturn = CFG.buyAmountSol * (1 + changePct / 100);
+    const feesEstimate = CFG.buyAmountSol * ((CFG.pumpFunFeePct * 2) / 100);
+    const netReturn = Math.max(0, grossReturn - feesEstimate);
+    const pnlSol = netReturn - CFG.buyAmountSol;
+    const pnlPct = (pnlSol / CFG.buyAmountSol) * 100;
+
+    paper.balance += netReturn;
+    paper.closedTrades.push({ pnlSol, pnlPct, reason, name: pos.name });
+
+    log(
+      `[PAPER] Clôture ${pos.symbol}: ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(1)}%) | ` +
+        `nouveau solde=${paper.balance.toFixed(4)} SOL`
+    );
+  }
 }
 
 // ---------- Suivi prix position ouverte (via trades live du mint) ----------
@@ -153,17 +209,17 @@ function evaluatePosition(mint, currentMarketCapSol) {
     ((currentMarketCapSol - pos.entryPriceSol) / pos.entryPriceSol) * 100;
 
   if (changePct >= CFG.takeProfitPct) {
-    sellToken(mint, `take-profit (+${changePct.toFixed(1)}%)`);
+    sellToken(mint, `take-profit (+${changePct.toFixed(1)}%)`, currentMarketCapSol);
     return;
   }
   if (changePct <= -CFG.stopLossPct) {
-    sellToken(mint, `stop-loss (${changePct.toFixed(1)}%)`);
+    sellToken(mint, `stop-loss (${changePct.toFixed(1)}%)`, currentMarketCapSol);
     return;
   }
   if (CFG.maxHoldMinutes > 0) {
     const heldMin = (Date.now() - pos.buyTimestamp) / 60000;
     if (heldMin >= CFG.maxHoldMinutes) {
-      sellToken(mint, `max-hold-time (${heldMin.toFixed(1)}min)`);
+      sellToken(mint, `max-hold-time (${heldMin.toFixed(1)}min)`, currentMarketCapSol);
     }
   }
 }
@@ -235,10 +291,17 @@ function subscribeTokenTrades(mint) {
 // ---------- Boot ----------
 log("=== Bot pump.fun démarré ===");
 log(`DRY_RUN=${CFG.dryRun} | buy=${CFG.buyAmountSol} SOL | TP=${CFG.takeProfitPct}% | SL=${CFG.stopLossPct}%`);
+if (CFG.dryRun) {
+  log(`[PAPER] Mode paper trading actif. Solde fictif de départ = ${paper.balance.toFixed(4)} SOL`);
+}
 if (!keypair && !CFG.dryRun) {
   log("ATTENTION: aucune clé privée fournie et DRY_RUN=false -> le bot ne pourra pas trader.");
 }
 connectMainSocket();
+
+if (CFG.dryRun && CFG.statsIntervalMinutes > 0) {
+  setInterval(logPaperSummary, CFG.statsIntervalMinutes * 60 * 1000);
+}
 
 // keepalive simple pour Railway (évite exit process)
 setInterval(() => {}, 1 << 30);
