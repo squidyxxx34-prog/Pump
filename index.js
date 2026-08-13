@@ -90,6 +90,11 @@ function passesFilter(tokenEvent) {
 
 // ---------- Construction + envoi transaction via Local Trading API ----------
 async function trade(action, mint, amount, denominatedInSol) {
+  if (CFG.dryRun) {
+    log(`[DRY_RUN] ${action.toUpperCase()} ${mint} amount=${amount} sol=${denominatedInSol}`);
+    return { simulated: true };
+  }
+
   if (!keypair) {
     log("ERREUR: SOLANA_PRIVATE_KEY manquante, impossible de trader.");
     return null;
@@ -105,11 +110,6 @@ async function trade(action, mint, amount, denominatedInSol) {
     priorityFee: CFG.priorityFeeSol,
     pool: "pump",
   };
-
-  if (CFG.dryRun) {
-    log(`[DRY_RUN] ${action.toUpperCase()} ${mint} amount=${amount} sol=${denominatedInSol}`);
-    return { simulated: true };
-  }
 
   try {
     const res = await fetch(PUMPPORTAL_TRADE_LOCAL, {
