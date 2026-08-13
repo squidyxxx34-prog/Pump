@@ -28,7 +28,7 @@ const CFG = {
   maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || "1", 10),
   paperStartingBalanceSol: parseFloat(process.env.PAPER_STARTING_BALANCE_SOL || "1"),
   pumpFunFeePct: 1, // fee natif pump.fun, incompressible, appliqué même en paper trading
-  ntfyTopic: process.env.NTFY_TOPIC || "",
+  ntfyTopic: process.env.NTFY_TOPIC || "pump_fun_bot",
 };
 
 const PUMPPORTAL_WS = "wss://pumpportal.fun/api/data";
@@ -60,11 +60,14 @@ function log(...args) {
 async function notify(title, message) {
   if (!CFG.ntfyTopic) return;
   try {
-    await fetch(`https://ntfy.sh/${CFG.ntfyTopic}`, {
+    const res = await fetch(`https://ntfy.sh/${CFG.ntfyTopic}`, {
       method: "POST",
       headers: { Title: title, Priority: "default" },
       body: message,
     });
+    if (!res.ok) {
+      log(`Notification refusée par ntfy.sh (status ${res.status})`);
+    }
   } catch (err) {
     log("Erreur envoi notification:", err.message);
   }
@@ -319,6 +322,8 @@ log(`DRY_RUN=${CFG.dryRun} | buy=${CFG.buyAmountSol} SOL | TP=${CFG.takeProfitPc
 if (CFG.dryRun) {
   log(`[PAPER] Mode paper trading actif. Solde fictif de départ = ${paper.balance.toFixed(4)} SOL`);
 }
+log(`Notifications: topic ntfy.sh = "${CFG.ntfyTopic}"`);
+notify("🤖 Bot démarré", `pump.fun bot en ligne | DRY_RUN=${CFG.dryRun}`);
 if (!keypair && !CFG.dryRun) {
   log("ATTENTION: aucune clé privée fournie et DRY_RUN=false -> le bot ne pourra pas trader.");
 }
