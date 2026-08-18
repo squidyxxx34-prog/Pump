@@ -288,7 +288,7 @@ function connectMainSocket() {
   ws.on("error", (err) => log("Erreur socket principal:", err.message));
 }
 
-// ---------- WebSocket par position (suivi prix live) ----------
+// ---------- WebSocket par positivon (suivi prix live) ----------
 function subscribeTokenTrades(mint) {
   const ws = new WebSocket(PUMPPORTAL_WS);
 
