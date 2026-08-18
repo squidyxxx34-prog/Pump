@@ -337,6 +337,17 @@ function connectMainSocket() {
 function connectScoreSocket() {
   scoreSocket = new WebSocket(PUMPPORTAL_WS);
 
+  scoreSocket.on("open", () => {
+    // resouscrit tout ce qui est actuellement suivi (couvre le 1er connect ET les reconnexions)
+    const mints = [...candidates.keys(), ...positions.keys()];
+    if (mints.length > 0) {
+      scoreSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: mints }));
+      log(`Score socket (re)connecté, ${mints.length} mint(s) resouscrit(s).`);
+    } else {
+      log("Score socket connecté.");
+    }
+  });
+
   scoreSocket.on("message", (raw) => {
     let data;
     try {
