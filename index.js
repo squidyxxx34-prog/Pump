@@ -19,9 +19,12 @@ const CFG = {
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
-  takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || "50"),
-  stopLossPct: parseFloat(process.env.STOP_LOSS_PCT || "25"),
-  maxHoldMinutes: parseFloat(process.env.MAX_HOLD_MINUTES || "30"),
+  takeProfitPct: parseFloat(process.env.TAKE_PROFIT_PCT || "80"),
+  stopLossPct: parseFloat(process.env.STOP_LOSS_PCT || "20"),
+  maxHoldMinutes: parseFloat(process.env.MAX_HOLD_MINUTES || "15"),
+  deadTokenTimeoutMinutes: parseFloat(process.env.DEAD_TOKEN_TIMEOUT_MINUTES || "2"),
+  candidateWindowSeconds: parseFloat(process.env.CANDIDATE_WINDOW_SECONDS || "8"),
+  minBuysToQualify: parseInt(process.env.MIN_BUYS_TO_QUALIFY || "2", 10),
   slippagePct: parseFloat(process.env.SLIPPAGE_PCT || "15"),
   priorityFeeSol: parseFloat(process.env.PRIORITY_FEE_SOL || "0.0001"),
   dryRun: (process.env.DRY_RUN || "true").toLowerCase() !== "false",
@@ -44,6 +47,10 @@ const connection = new Connection(CFG.rpcUrl, "confirmed");
 // ---------- State ----------
 // positions ouvertes: mint -> { entryPriceSol, amountTokens, buyTimestamp }
 const positions = new Map();
+
+// candidats en cours d'observation: mint -> { name, symbol, createdAt, buyCount, marketCapSol }
+const candidates = new Map();
+let scoreSocket = null;
 
 // ---------- Paper trading (solde fictif, données de marché réelles) ----------
 const paper = {
@@ -93,7 +100,7 @@ function logPaperSummary() {
   );
 }
 
-// ---------- Filtre stratégie snipe ----------
+// ---------- Filtre initial (avant même de devenir candidat) ----------
 function passesFilter(tokenEvent) {
   const name = (tokenEvent.name || "").toLowerCase();
   const symbol = (tokenEvent.symbol || "").toLowerCase();
@@ -189,11 +196,14 @@ async function buyToken(tokenEvent) {
     entryPriceSol: tokenEvent.marketCapSol ?? tokenEvent.vSolInBondingCurve ?? 0,
     lastKnownMarketCapSol: tokenEvent.marketCapSol ?? tokenEvent.vSolInBondingCurve ?? 0,
     buyTimestamp: Date.now(),
+    lastActivityTimestamp: Date.now(), // mis à jour à chaque trade reçu sur ce mint
     name: tokenEvent.name,
     symbol: tokenEvent.symbol,
   });
 
-  subscribeTokenTrades(mint);
+  if (scoreSocket && scoreSocket.readyState === WebSocket.OPEN) {
+    scoreSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+  }
 }
 
 // ---------- Vente ----------
@@ -240,6 +250,7 @@ function evaluatePosition(mint, currentMarketCapSol) {
   if (!pos || !pos.entryPriceSol) return;
 
   pos.lastKnownMarketCapSol = currentMarketCapSol; // toujours garder le dernier prix connu
+  pos.lastActivityTimestamp = Date.now(); // un trade est arrivé -> token pas mort
 
   const changePct =
     ((currentMarketCapSol - pos.entryPriceSol) / pos.entryPriceSol) * 100;
@@ -258,17 +269,24 @@ function evaluatePosition(mint, currentMarketCapSol) {
 // (un token peu liquide peut ne plus émettre aucun trade après l'achat -> sans ce check
 // séparé, max-hold-time ne se déclencherait jamais)
 function checkMaxHoldTime() {
-  if (CFG.maxHoldMinutes <= 0) return;
   const now = Date.now();
   for (const [mint, pos] of positions.entries()) {
     const heldMin = (now - pos.buyTimestamp) / 60000;
-    if (heldMin >= CFG.maxHoldMinutes) {
+    const inactiveMin = (now - pos.lastActivityTimestamp) / 60000;
+
+    // token mort: aucun trade reçu depuis DEAD_TOKEN_TIMEOUT_MINUTES -> sortie anticipée
+    if (CFG.deadTokenTimeoutMinutes > 0 && inactiveMin >= CFG.deadTokenTimeoutMinutes) {
+      sellToken(mint, `token inactif (${inactiveMin.toFixed(1)}min sans trade)`, pos.lastKnownMarketCapSol);
+      continue;
+    }
+
+    if (CFG.maxHoldMinutes > 0 && heldMin >= CFG.maxHoldMinutes) {
       sellToken(mint, `max-hold-time (${heldMin.toFixed(1)}min)`, pos.lastKnownMarketCapSol);
     }
   }
 }
 
-// ---------- WebSocket principal (nouveaux tokens) ----------
+// ---------- WebSocket principal (nouveaux tokens -> deviennent candidats) ----------
 function connectMainSocket() {
   const ws = new WebSocket(PUMPPORTAL_WS);
 
@@ -277,7 +295,7 @@ function connectMainSocket() {
     ws.send(JSON.stringify({ method: "subscribeNewToken" }));
   });
 
-  ws.on("message", async (raw) => {
+  ws.on("message", (raw) => {
     let data;
     try {
       data = JSON.parse(raw.toString());
@@ -285,9 +303,20 @@ function connectMainSocket() {
       return;
     }
     if (!data.mint) return; // ignore messages non pertinents
+    if (candidates.has(data.mint) || positions.has(data.mint)) return;
 
     if (passesFilter(data)) {
-      await buyToken(data);
+      candidates.set(data.mint, {
+        name: data.name,
+        symbol: data.symbol,
+        createdAt: Date.now(),
+        buyCount: 0,
+        volumeSol: 0,
+        marketCapSol: data.marketCapSol ?? data.vSolInBondingCurve ?? 0,
+      });
+      if (scoreSocket && scoreSocket.readyState === WebSocket.OPEN) {
+        scoreSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [data.mint] }));
+      }
     }
   });
 
@@ -299,37 +328,82 @@ function connectMainSocket() {
   ws.on("error", (err) => log("Erreur socket principal:", err.message));
 }
 
-// ---------- WebSocket par position (suivi prix live) ----------
-function subscribeTokenTrades(mint) {
-  const ws = new WebSocket(PUMPPORTAL_WS);
+// ---------- Scoring des candidats (comptage achats live) ----------
+function connectScoreSocket() {
+  scoreSocket = new WebSocket(PUMPPORTAL_WS);
 
-  ws.on("open", () => {
-    ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
-  });
-
-  ws.on("message", (raw) => {
-    if (!positions.has(mint)) {
-      ws.close();
-      return;
-    }
+  scoreSocket.on("message", (raw) => {
     let data;
     try {
       data = JSON.parse(raw.toString());
     } catch {
       return;
     }
+    if (!data.mint) return;
     const mc = data.marketCapSol ?? data.vSolInBondingCurve;
-    if (mc !== undefined) evaluatePosition(mint, mc);
-  });
 
-  ws.on("close", () => {
-    if (positions.has(mint)) {
-      // reconnecte tant que la position est ouverte
-      setTimeout(() => subscribeTokenTrades(mint), 3000);
+    // position ouverte sur ce mint -> évalue TP/SL
+    if (positions.has(data.mint)) {
+      if (mc !== undefined) evaluatePosition(data.mint, mc);
+      return;
     }
+
+    // sinon, candidat en observation -> scoring trending
+    const cand = candidates.get(data.mint);
+    if (!cand) return;
+    const isBuy = data.txType === "buy" || data.is_buy === true;
+    if (isBuy) {
+      cand.buyCount += 1;
+      cand.volumeSol += data.solAmount ?? 0;
+    }
+    if (mc !== undefined) cand.marketCapSol = mc;
   });
 
-  ws.on("error", () => {});
+  scoreSocket.on("close", () => {
+    log("Score socket fermé, reconnexion dans 3s...");
+    setTimeout(connectScoreSocket, 3000);
+  });
+
+  scoreSocket.on("error", () => {});
+}
+
+// évalue les candidats dont la fenêtre d'observation est close, achète le plus trending
+function resolveCandidates() {
+  const now = Date.now();
+  const expired = [];
+
+  for (const [mint, cand] of candidates.entries()) {
+    const ageSec = (now - cand.createdAt) / 1000;
+    if (ageSec >= CFG.candidateWindowSeconds) expired.push([mint, cand]);
+  }
+  if (expired.length === 0) return;
+
+  // retire tous les candidats expirés de la liste d'observation
+  for (const [mint] of expired) {
+    candidates.delete(mint);
+    if (scoreSocket && scoreSocket.readyState === WebSocket.OPEN) {
+      scoreSocket.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
+    }
+  }
+
+  if (positions.size >= CFG.maxOpenPositions) return;
+
+  // le plus trending = le plus d'achats reçus pendant la fenêtre, tie-break sur volume
+  expired.sort((a, b) => b[1].buyCount - a[1].buyCount || b[1].volumeSol - a[1].volumeSol);
+  const [winnerMint, winner] = expired[0];
+
+  if (winner.buyCount < CFG.minBuysToQualify) {
+    log(`Aucun candidat assez trending (meilleur: ${winner.symbol} avec ${winner.buyCount} achats), skip.`);
+    return;
+  }
+
+  log(`Trending détecté: ${winner.symbol} (${winner.buyCount} achats en ${CFG.candidateWindowSeconds}s)`);
+  buyToken({
+    mint: winnerMint,
+    name: winner.name,
+    symbol: winner.symbol,
+    marketCapSol: winner.marketCapSol,
+  });
 }
 
 // ---------- Boot ----------
@@ -344,9 +418,13 @@ if (!keypair && !CFG.dryRun) {
   log("ATTENTION: aucune clé privée fournie et DRY_RUN=false -> le bot ne pourra pas trader.");
 }
 connectMainSocket();
+connectScoreSocket();
 
 // check indépendant du max-hold-time, pas seulement quand un trade websocket arrive
 setInterval(checkMaxHoldTime, 30 * 1000);
+
+// résout les candidats en fin de fenêtre d'observation (achète le plus trending)
+setInterval(resolveCandidates, 1000);
 
 // serveur HTTP minimal - juste pour répondre au healthcheck Railway (le bot n'a pas besoin de port)
 const port = process.env.PORT || 3000;
