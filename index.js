@@ -288,7 +288,7 @@ function connectMainSocket() {
   ws.on("error", (err) => log("Erreur socket principal:", err.message));
 }
 
-// ---------- WebSocket par positivon (suivi prix live) ----------
+// ---------- WebSocket par position (suivi prix live) ----------
 function subscribeTokenTrades(mint) {
   const ws = new WebSocket(PUMPPORTAL_WS);
 
@@ -342,6 +342,17 @@ http
     res.end("pumpfun-bot OK\n");
   })
   .listen(port, () => log(`Healthcheck HTTP en écoute sur le port ${port}`));
+
+// ---------- Heartbeat (notif toutes les 5min - confirme que le bot est vivant) ----------
+const bootTime = Date.now();
+setInterval(() => {
+  const uptimeMin = Math.round((Date.now() - bootTime) / 60000);
+  const balanceInfo = CFG.dryRun ? ` | Solde: ${paper.balance.toFixed(4)} SOL` : "";
+  notify(
+    "Bot actif",
+    `Uptime: ${uptimeMin}min | Positions ouvertes: ${positions.size}${balanceInfo}`
+  );
+}, 5 * 60 * 1000);
 
 // ---------- Arrêt propre + robustesse ----------
 // évite un crash bruyant (npm error) sur un SIGTERM normal de Railway (redeploy, scaling)
