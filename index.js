@@ -187,6 +187,7 @@ async function buyToken(tokenEvent) {
 
   positions.set(mint, {
     entryPriceSol: tokenEvent.marketCapSol ?? tokenEvent.vSolInBondingCurve ?? 0,
+    lastKnownMarketCapSol: tokenEvent.marketCapSol ?? tokenEvent.vSolInBondingCurve ?? 0,
     buyTimestamp: Date.now(),
     name: tokenEvent.name,
     symbol: tokenEvent.symbol,
@@ -238,6 +239,8 @@ function evaluatePosition(mint, currentMarketCapSol) {
   const pos = positions.get(mint);
   if (!pos || !pos.entryPriceSol) return;
 
+  pos.lastKnownMarketCapSol = currentMarketCapSol; // toujours garder le dernier prix connu
+
   const changePct =
     ((currentMarketCapSol - pos.entryPriceSol) / pos.entryPriceSol) * 100;
 
@@ -249,10 +252,18 @@ function evaluatePosition(mint, currentMarketCapSol) {
     sellToken(mint, `stop-loss (${changePct.toFixed(1)}%)`, currentMarketCapSol);
     return;
   }
-  if (CFG.maxHoldMinutes > 0) {
-    const heldMin = (Date.now() - pos.buyTimestamp) / 60000;
+}
+
+// vérifie le temps de hold indépendamment des messages websocket reçus
+// (un token peu liquide peut ne plus émettre aucun trade après l'achat -> sans ce check
+// séparé, max-hold-time ne se déclencherait jamais)
+function checkMaxHoldTime() {
+  if (CFG.maxHoldMinutes <= 0) return;
+  const now = Date.now();
+  for (const [mint, pos] of positions.entries()) {
+    const heldMin = (now - pos.buyTimestamp) / 60000;
     if (heldMin >= CFG.maxHoldMinutes) {
-      sellToken(mint, `max-hold-time (${heldMin.toFixed(1)}min)`, currentMarketCapSol);
+      sellToken(mint, `max-hold-time (${heldMin.toFixed(1)}min)`, pos.lastKnownMarketCapSol);
     }
   }
 }
@@ -333,6 +344,9 @@ if (!keypair && !CFG.dryRun) {
   log("ATTENTION: aucune clé privée fournie et DRY_RUN=false -> le bot ne pourra pas trader.");
 }
 connectMainSocket();
+
+// check indépendant du max-hold-time, pas seulement quand un trade websocket arrive
+setInterval(checkMaxHoldTime, 30 * 1000);
 
 // serveur HTTP minimal - juste pour répondre au healthcheck Railway (le bot n'a pas besoin de port)
 const port = process.env.PORT || 3000;
