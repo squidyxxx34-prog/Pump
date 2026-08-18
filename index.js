@@ -60,10 +60,15 @@ function log(...args) {
 async function notify(title, message) {
   if (!CFG.ntfyTopic) return;
   try {
-    const res = await fetch(`https://ntfy.sh/${CFG.ntfyTopic}`, {
+    const res = await fetch("https://ntfy.sh/", {
       method: "POST",
-      headers: { Title: title, Priority: "default" },
-      body: message,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        topic: CFG.ntfyTopic,
+        title,
+        message,
+        priority: 3,
+      }),
     });
     if (!res.ok) {
       log(`Notification refusée par ntfy.sh (status ${res.status})`);
