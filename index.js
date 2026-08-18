@@ -85,8 +85,14 @@ async function notify(title, message) {
       log(`Notification refusée par ntfy.sh (status ${res.status})`);
     }
   } catch (err) {
-    const detail = err.cause?.code || err.cause?.message || err.message || String(err);
-    log("Erreur envoi notification:", detail);
+    const detail = {
+      message: err.message,
+      code: err.code,
+      errno: err.errno,
+      type: err.type,
+      cause: err.cause ? { message: err.cause.message, code: err.cause.code } : undefined,
+    };
+    log("Erreur envoi notification:", JSON.stringify(detail));
   }
 }
 
