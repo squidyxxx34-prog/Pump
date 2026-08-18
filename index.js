@@ -67,6 +67,8 @@ function log(...args) {
 async function notify(title, message) {
   if (!CFG.ntfyTopic) return;
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const res = await fetch("https://ntfy.sh/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -76,12 +78,15 @@ async function notify(title, message) {
         message,
         priority: 3,
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     if (!res.ok) {
       log(`Notification refusée par ntfy.sh (status ${res.status})`);
     }
   } catch (err) {
-    log("Erreur envoi notification:", err.message);
+    const detail = err.cause?.code || err.cause?.message || err.message || String(err);
+    log("Erreur envoi notification:", detail);
   }
 }
 
